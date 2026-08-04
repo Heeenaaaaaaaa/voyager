@@ -16,6 +16,7 @@
   /** Timeout for watermark processing in milliseconds */
   const WATERMARK_PROCESSING_TIMEOUT_MS = 30000;
   const DOWNLOAD_INTENT_ATTRIBUTE = 'data-download-intent-expires-at';
+  const DOWNLOAD_INTENT_TOKEN_ATTRIBUTE = 'data-download-intent-token';
   const NOTEBOOK_PATH_PATTERN = /^\/(?:u\/\d+\/)?notebooks?(?:\/|$)/;
 
   const isNotebookRoute = () => NOTEBOOK_PATH_PATTERN.test(window.location.pathname);
@@ -109,12 +110,13 @@
   /**
    * Update status on the bridge for the content script to pick up (and show Toasts)
    */
-  const updateStatus = (status, details = {}) => {
+  const updateStatus = (status, intentToken, details = {}) => {
     const bridge = getBridgeElement();
     if (bridge) {
       bridge.dataset.status = JSON.stringify({
         type: status, // 'START', 'PROGRESS', 'SUCCESS', 'ERROR', 'WARNING'
         timestamp: Date.now(),
+        intentToken,
         ...details,
       });
     }
@@ -137,8 +139,48 @@
   const consumeDownloadIntent = () => {
     const bridge = getBridgeElement();
     const expiresAt = Number(bridge.dataset.downloadIntentExpiresAt || 0);
+    const intentToken = bridge.dataset.downloadIntentToken || `legacy:${expiresAt}`;
     bridge.removeAttribute(DOWNLOAD_INTENT_ATTRIBUTE);
-    return Number.isFinite(expiresAt) && expiresAt >= Date.now();
+    bridge.removeAttribute(DOWNLOAD_INTENT_TOKEN_ATTRIBUTE);
+    return Number.isFinite(expiresAt) && expiresAt >= Date.now() ? intentToken : null;
+  };
+
+  /**
+   * Ask the isolated content script to compare Google's downloaded image with
+   * the preview captured at click time. This is deliberately fire-and-forget:
+   * health checking must never delay or replace Gemini's native response when
+   * watermark removal is disabled.
+   */
+  const requestImageHealthInspection = async (response, intentToken) => {
+    try {
+      const contentType = response.headers.get('content-type') || '';
+      if (
+        !response.ok ||
+        (contentType &&
+          !contentType.startsWith('image/') &&
+          !contentType.startsWith('application/octet-stream'))
+      ) {
+        return;
+      }
+
+      const blob = await response.blob();
+      const reader = new FileReader();
+      reader.onloadend = () => {
+        const bridge = getBridgeElement();
+        bridge.dataset.request = JSON.stringify({
+          requestId: 'gv_health_' + Date.now() + '_' + Math.random().toString(36).slice(2, 11),
+          mode: 'inspect',
+          intentToken,
+          base64: reader.result,
+        });
+      };
+      reader.onerror = () => {
+        console.warn('[Gemini Voyager] Failed to read image for download health inspection');
+      };
+      reader.readAsDataURL(blob);
+    } catch (error) {
+      console.warn('[Gemini Voyager] Download health inspection failed:', error);
+    }
   };
 
   // Store original fetch
@@ -168,9 +210,27 @@
 
     // Check if this is a Gemini download request (specifically rd-gg-dl for downloads)
     if (url && typeof url === 'string' && GEMINI_DOWNLOAD_PATTERN.test(url)) {
-      const shouldProcessDownload = isWatermarkRemoverEnabled() && consumeDownloadIntent();
-      if (!shouldProcessDownload) {
+      const watermarkRemoverEnabled = isWatermarkRemoverEnabled();
+      const downloadIntentToken = consumeDownloadIntent();
+      if (!downloadIntentToken) {
         return originalFetch.apply(this, args);
+      }
+
+      if (!watermarkRemoverEnabled) {
+        const nativeResponsePromise = originalFetch.apply(this, args);
+        void nativeResponsePromise.then(
+          (response) => {
+            try {
+              // Clone before Gemini consumes the body, while returning the original
+              // Promise and Response objects to the page unchanged.
+              void requestImageHealthInspection(response.clone(), downloadIntentToken);
+            } catch (error) {
+              console.warn('[Gemini Voyager] Could not clone image for health inspection:', error);
+            }
+          },
+          () => undefined,
+        );
+        return nativeResponsePromise;
       }
 
       // Replace with original size URL
@@ -206,30 +266,32 @@
         try {
           // Check content length first (via HEAD request) to show appropriate message
           // But we'll just show "downloading" first and update if large
-          updateStatus('DOWNLOADING');
+          updateStatus('DOWNLOADING', downloadIntentToken);
 
           // Fetch the original size image
           response = await originalFetch.apply(this, args);
 
           if (!response.ok) {
-            updateStatus('ERROR', { message: `HTTP Error: ${response.status}` });
+            updateStatus('ERROR', downloadIntentToken, {
+              message: `HTTP Error: ${response.status}`,
+            });
             return response;
           }
 
           // Check content length for large files (5MB) - update status
           const contentLength = response.headers.get('content-length');
           if (contentLength && parseInt(contentLength, 10) > 5 * 1024 * 1024) {
-            updateStatus('DOWNLOADING_LARGE');
+            updateStatus('DOWNLOADING_LARGE', downloadIntentToken);
           }
 
           // Clone response to read blob
           blob = await response.blob();
 
           // Step 2: Processing
-          updateStatus('PROCESSING');
+          updateStatus('PROCESSING', downloadIntentToken);
 
           // Send blob to content script for watermark removal via DOM bridge
-          const processedBlob = await new Promise((resolve, reject) => {
+          const processedResult = await new Promise((resolve, reject) => {
             const requestId = 'gv_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
             const bridge = getBridgeElement();
 
@@ -247,7 +309,7 @@
                     else
                       fetch(data.base64)
                         .then((r) => r.blob())
-                        .then(resolve)
+                        .then((blob) => resolve({ blob, corrupted: data.corrupted === true }))
                         .catch(reject);
                   }
                 } catch (e) {
@@ -260,7 +322,11 @@
             // Send request via DOM bridge
             const reader = new FileReader();
             reader.onloadend = () => {
-              bridge.dataset.request = JSON.stringify({ requestId, base64: reader.result });
+              bridge.dataset.request = JSON.stringify({
+                requestId,
+                intentToken: downloadIntentToken,
+                base64: reader.result,
+              });
             };
             reader.onerror = () => reject(new Error('Failed to read blob'));
             reader.readAsDataURL(blob);
@@ -272,17 +338,22 @@
             }, WATERMARK_PROCESSING_TIMEOUT_MS);
           });
 
-          updateStatus('SUCCESS');
+          updateStatus(
+            processedResult.corrupted ? 'GOOGLE_IMAGE_CORRUPTED' : 'SUCCESS',
+            downloadIntentToken,
+          );
 
           // Return processed response
-          return new Response(processedBlob, {
+          return new Response(processedResult.blob, {
             status: response.status,
             statusText: response.statusText,
             headers: response.headers,
           });
         } catch (error) {
           console.warn('[Gemini Voyager] Watermark processing failed, using original:', error);
-          updateStatus('ERROR', { message: error.message || 'Unknown error' });
+          updateStatus('ERROR', downloadIntentToken, {
+            message: error.message || 'Unknown error',
+          });
           // Return the original blob if available, otherwise fall through to originalFetch
           if (blob && response) {
             return new Response(blob, {

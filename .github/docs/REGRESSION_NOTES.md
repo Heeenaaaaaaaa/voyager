@@ -26,6 +26,28 @@ Regression test:
 Commit:
 ```
 
+## Timeline navigation must validate the live scroll viewport
+
+Symptom:
+
+Timeline dots, preview-list items, and `j`/`k` shortcuts could all appear inert after Gemini rebuilt its chat viewport.
+
+Root cause:
+
+The navigation fast path treated connected marker and container nodes as current. Gemini can insert a new scroll viewport inside the old connected container, so Voyager wrote `scrollTop` to the stale ancestor.
+
+Fix:
+
+Before navigation, validate the target's nearest scroll container against the cached viewport. Rebind and recalculate markers when it changed, including preview-panel navigation.
+
+Regression test:
+
+`src/pages/content/timeline/__tests__/TimelineManagerFlowClickActiveReset.test.ts` (`refreshes connected markers when Gemini inserts a new scroll viewport` and `refreshes the scroll viewport before preview-panel navigation`) and `src/pages/content/timeline/__tests__/TimelineManagerNavigationRefresh.test.ts` (`rebinds a connected stale scroll viewport before shortcut navigation`).
+
+Commit:
+
+`fix(timeline): refresh stale scroll viewports`
+
 ## Low-confidence watermark matches require isolated trial removal
 
 Symptom:
@@ -64,6 +86,40 @@ Commit:
 
 `fix(watermark): add difficult-match fallback`
 
+## Full-size V2 removal needs gradient-backed transition evidence
+
+Symptom:
+
+A subtle 96px V2 watermark on a bright diagonal background was detected at the
+correct anchor, but the visually correct reverse-alpha result was rolled back.
+
+Root cause:
+
+The reconstructed background retained mild positive spatial correlation with
+the star template, leaving spatial suppression at `0.177`, just below the
+default `0.2` reliability-transition gate even though gradient correlation
+dropped from `0.167` to `0.052` without clipping or severe undershoot.
+
+Fix:
+
+Keep the default safety gate unchanged. Only for the exact 96px May 2026 V2
+preset, accept the first transition out of reliable detection when spatial and
+gradient suppression independently exceed narrow thresholds, the absolute
+residual correlations are below the direct-match thresholds, and the trial
+introduces no new black or clipped pixels. Correlation sign is deliberately
+ignored because a clean reconstruction can cross zero. Subsequent passes still
+use the default gate.
+
+Regression test:
+
+`src/pages/content/watermarkRemover/__tests__/watermarkEngine.test.ts`
+(`accepts the reported full-size V2 reliability transition without weakening
+the default gate` and `rejects the supported transition when ...`).
+
+Commit:
+
+`fix(watermark): accept safe full-size V2 transitions`
+
 ## Dark watermark restoration must distinguish clipping from severe undershoot
 
 Symptom:
@@ -94,6 +150,128 @@ pixels`).
 Commit:
 
 `fix(watermark): distinguish dark restoration from clipping damage`
+
+## Watermark toggles must reconfigure already-open Gemini tabs
+
+Symptom:
+
+Changing either watermark-removal toggle in the popup had no effect in an
+already-open Gemini tab until the page was refreshed.
+
+Root cause:
+
+The content runtime read both settings only during startup. Background
+registration kept future documents in sync, but dynamically registering
+`fetchInterceptor.js` did not install it into a document that was already open
+when download removal changed from disabled to enabled.
+
+Fix:
+
+Route watermark storage changes through the existing content-script storage
+listener only after normal Gemini startup has activated the watermark runtime,
+reuse its initialized engine, and reject stale async starts and in-flight
+preview writes with a lifecycle generation. Reconfigure preview and download
+as separate lifecycles: if download removal stays enabled, preserve its bridge,
+intent, observers, and active feedback while preview changes; only a true
+download disable performs the full download teardown. Tag each download intent
+and MAIN-world status with the same token so a late result from an older
+download cannot finalize a newer sequence. If a restart leaves preview removal
+enabled, retry stale preview work after releasing its queue slot. Clear preview
+bookkeeping without restoring the current image source, so Gemini can reuse the
+same image node without stale markers blocking a later preview. When download
+removal is enabled, also inject the guarded MAIN-world interceptor once into
+matching open tabs; disabling keeps installed wrappers in immediate
+pass-through mode through the DOM bridge.
+
+Regression test:
+
+`src/pages/content/watermarkRemover/__tests__/runtimeToggle.test.ts` verifies
+bidirectional runtime changes, engine reuse, stale-start and stale-preview
+rejection, latest-lifecycle preview retry, reused-node processing, preview-only
+download preservation, stopped-download cleanup, stale-status rejection, and
+startup-gated content entry wiring.
+`src/pages/background/__tests__/watermarkOpenTabs.test.ts` verifies targeted
+MAIN-world injection and closed-tab failure handling.
+
+Commit:
+
+`fix(watermark): apply toggles to open Gemini tabs`
+
+## Watermark download indicators must not wait for engine assets
+
+Symptom:
+
+The 🍌 indicator appeared noticeably after Gemini's download button, even
+though clicks during that window already queued correctly for watermark
+processing.
+
+Root cause:
+
+The download bridge was installed before `WatermarkEngine.create()`, but both
+the initial indicator decoration and its DOM observer were installed only after
+the engine finished loading all watermark image assets.
+
+Fix:
+
+Decorate existing buttons and start the lightweight indicator observer before
+awaiting engine initialization. When preview removal is enabled, disconnect
+that temporary observer before the preview observer takes over so only one
+page-wide image observer remains active.
+
+Regression test:
+
+`src/pages/content/watermarkRemover/__tests__/engineRaceCondition.test.ts`
+(`shows download indicators while WatermarkEngine.create is still pending`).
+
+Commit:
+
+`fix(watermark): show indicators while engine loads`
+
+## Native download health checks must not depend on watermark removal
+
+Symptom:
+
+Gemini could show a sharp generated-image preview but return a blurred or
+partially blank full-size PNG from its native download endpoint. With watermark
+removal disabled, Voyager passed the response through correctly but could not
+warn the user that Google's file itself was damaged.
+
+Root cause:
+
+Download click intent, the MAIN-world response bridge, and status toasts were
+all started only for watermark processing. Turning removal off therefore also
+disabled read-only comparison between the clicked preview and Google's final
+image bytes. The first implementation also sampled Gemini's visible
+`googleusercontent.com` `<img>` directly. Because Gemini does not set a
+`crossorigin` attribute, Canvas pixel readback was tainted and silently
+returned no preview fingerprint, causing the damaged download to be reported
+as successful.
+
+Fix:
+
+Keep lightweight click intent and bridge listeners active independently of the
+two removal toggles. When removal is off, return Gemini's original Promise and
+Response objects unchanged, inspect only a clone, and warn only when a 32×32
+preview/download fingerprint has a severe mismatch. Never warn from the
+download alone: a legitimate image may intentionally contain a large flat
+region. If direct preview sampling is tainted, fetch that exact preview URL
+through the extension runtime and await its origin-clean fingerprint without
+delaying the synchronous native download intent.
+
+Regression test:
+
+`src/pages/content/watermarkRemover/__tests__/fetchInterceptor.test.ts` verifies
+the disabled path preserves native Promise/Response identity while requesting
+inspection. `imageHealthDetector.test.ts` covers damaged, healthy, and
+legitimate-flat-region samples; `downloadToasts.test.ts` verifies the disabled
+path stays silent unless a corruption status arrives.
+`corruptedDownloadDetection.test.ts` reproduces a tainted Gemini preview and
+requires the extension-fetch fallback to flag the mismatched download.
+
+Commit:
+
+`fix(watermark): warn about corrupted Google downloads`
+`fix(watermark): handle tainted preview health checks`
 
 ## Mermaid must honor Gemini explicit light theme
 

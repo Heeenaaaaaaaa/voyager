@@ -30,12 +30,35 @@ describe('SettingsBackupService', () => {
         [StorageKeys.COACHMARKS_SEEN]: [],
         [StorageKeys.EXPORT_IMAGE_WIDTH]: 620,
         [StorageKeys.SLASH_PROMPT_ENABLED]: true,
+        [StorageKeys.EXPORT_SPEAKER_LABELS]: {},
       }),
     );
     expect(BACKUPABLE_SYNC_SETTINGS_DEFAULTS).not.toHaveProperty(StorageKeys.PLUGINS_STATE);
     expect(NON_SETTINGS_BACKUP_POLICIES[StorageKeys.PLUGINS_STATE].disposition).toBe(
       'separate-file',
     );
+  });
+
+  it('keeps popup scroll position device-local and outside settings backup', () => {
+    const popupScrollKey = 'gvPopupScrollTop';
+
+    expect(BACKUPABLE_SYNC_SETTINGS_DEFAULTS).not.toHaveProperty(popupScrollKey);
+    expect(NON_SETTINGS_BACKUP_POLICIES).toHaveProperty(popupScrollKey, {
+      storage: 'local',
+      disposition: 'device-local',
+      reason: 'Popup scroll position is specific to this device and viewport.',
+    });
+  });
+
+  it('keeps the popup settings search query device-local', () => {
+    expect(BACKUPABLE_SYNC_SETTINGS_DEFAULTS).not.toHaveProperty(
+      StorageKeys.GV_POPUP_SETTINGS_SEARCH_QUERY,
+    );
+    expect(NON_SETTINGS_BACKUP_POLICIES[StorageKeys.GV_POPUP_SETTINGS_SEARCH_QUERY]).toEqual({
+      storage: 'local',
+      disposition: 'device-local',
+      reason: 'Popup settings search query is device-local UI state.',
+    });
   });
 
   it('exports only backupable sync settings with defaults applied', async () => {

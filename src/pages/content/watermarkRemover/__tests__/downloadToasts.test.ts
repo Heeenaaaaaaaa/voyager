@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { startWatermarkRemover } from '../index';
+import { startWatermarkRemover, stopWatermarkRemover } from '../index';
 
 vi.mock('@/utils/i18n', () => ({
   getTranslationSync: (key: string) => key,
@@ -30,9 +30,11 @@ describe('watermarkRemover download toasts', () => {
     document.head.innerHTML = '';
     document.body.innerHTML = '';
     vi.useFakeTimers();
+    vi.mocked(chrome.storage.sync.get).mockImplementation(async () => ({}));
   });
 
   afterEach(() => {
+    stopWatermarkRemover();
     vi.useRealTimers();
   });
 
@@ -55,7 +57,10 @@ describe('watermarkRemover download toasts', () => {
     expect(intentTtlMs).toBeGreaterThanOrEqual(59000);
     expect(intentTtlMs).toBeLessThanOrEqual(60000);
 
-    (bridge as HTMLElement).dataset.status = JSON.stringify({ type: 'DOWNLOADING_LARGE' });
+    (bridge as HTMLElement).dataset.status = JSON.stringify({
+      type: 'DOWNLOADING_LARGE',
+      intentToken: (bridge as HTMLElement).dataset.downloadIntentToken,
+    });
     await flushMutationObservers();
 
     const toastsAfter = document.querySelectorAll('.gv-status-toast');
@@ -64,5 +69,51 @@ describe('watermarkRemover download toasts', () => {
     vi.advanceTimersByTime(8000);
     const toastsFinal = document.querySelectorAll('.gv-status-toast');
     expect([...toastsFinal].some((toast) => toast.textContent === '大文件警告')).toBe(false);
+  });
+
+  it('ignores a late status from an older download sequence', async () => {
+    await startWatermarkRemover();
+
+    const button = document.createElement('button');
+    document.body.appendChild(button);
+    button.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+    const bridge = document.getElementById('gv-watermark-bridge') as HTMLElement;
+    bridge.dataset.status = JSON.stringify({
+      type: 'SUCCESS',
+      intentToken: 'stale-download-token',
+    });
+    await flushMutationObservers();
+
+    const toasts = [...document.querySelectorAll('.gv-status-toast')];
+    expect(toasts.some((toast) => toast.textContent === '正在下载原始图片')).toBe(true);
+    expect(toasts.some((toast) => toast.textContent === '正在下载')).toBe(false);
+  });
+
+  it('shows only a Google corruption warning when watermark removal is disabled', async () => {
+    vi.mocked(chrome.storage.sync.get).mockImplementation(async () => ({
+      gvWatermarkDownloadEnabled: false,
+      gvWatermarkPreviewEnabled: false,
+    }));
+    await startWatermarkRemover();
+
+    const button = document.createElement('button');
+    document.body.appendChild(button);
+    button.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+
+    expect(document.querySelectorAll('.gv-status-toast')).toHaveLength(0);
+    const bridge = document.getElementById('gv-watermark-bridge') as HTMLElement;
+    bridge.dataset.status = JSON.stringify({
+      type: 'GOOGLE_IMAGE_CORRUPTED',
+      intentToken: bridge.dataset.downloadIntentToken,
+    });
+    await flushMutationObservers();
+
+    const toasts = [...document.querySelectorAll('.gv-status-toast')];
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0].textContent).toBe(
+      'Google 返回的原图已损坏（并非 Voyager 导致）；下载结果可能模糊或内容缺失',
+    );
+    expect(toasts[0].classList.contains('gv-status-toast--warning')).toBe(true);
   });
 });

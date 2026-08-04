@@ -119,6 +119,7 @@ export const BACKUPABLE_SYNC_SETTINGS_DEFAULTS = {
   [StorageKeys.GV_VISUAL_EFFECT]: 'off',
   [StorageKeys.FORK_ENABLED]: false,
   [StorageKeys.EXPORT_IMAGE_WIDTH]: 620,
+  [StorageKeys.EXPORT_SPEAKER_LABELS]: {},
   [StorageKeys.PERSISTENT_EXPORT_TOOLBAR_ENABLED]: true,
   [StorageKeys.GV_AISTUDIO_ENABLED]: true,
   [StorageKeys.GV_SHOW_MESSAGE_TIMESTAMPS]: false,
@@ -252,13 +253,18 @@ export const NON_SETTINGS_BACKUP_POLICIES = {
   },
   [StorageKeys.FOLDERS_HIDDEN]: {
     storage: 'local',
-    disposition: 'device-local',
-    reason: 'Sidebar visibility is a per-device layout preference.',
+    disposition: 'deprecated',
+    reason: 'Folder hiding was replaced by the built-in collapse and Activity controls.',
   },
   [StorageKeys.FOLDERS_COLLAPSED]: {
     storage: 'local',
     disposition: 'device-local',
     reason: 'Expanded folder UI state is intentionally local.',
+  },
+  [StorageKeys.FOLDERS_VIEW_MODE]: {
+    storage: 'local',
+    disposition: 'device-local',
+    reason: 'The folder tree or Activity projection is a per-device layout preference.',
   },
   [StorageKeys.GV_GEMS_LIST_CACHE]: {
     storage: 'local',
@@ -355,6 +361,16 @@ export const NON_SETTINGS_BACKUP_POLICIES = {
     disposition: 'cache',
     reason:
       'Gemini response-id aliases are bounded, device-local, and rebuilt from conversation history.',
+  },
+  [StorageKeys.GV_POPUP_SCROLL_TOP]: {
+    storage: 'local',
+    disposition: 'device-local',
+    reason: 'Popup scroll position is specific to this device and viewport.',
+  },
+  [StorageKeys.GV_POPUP_SETTINGS_SEARCH_QUERY]: {
+    storage: 'local',
+    disposition: 'device-local',
+    reason: 'Popup settings search query is device-local UI state.',
   },
   [StorageKeys.FOLDER_PROJECT_PENDING_FOLDER_ID]: {
     storage: 'local',
